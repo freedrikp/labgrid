@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from time import sleep
 
 import pytest
@@ -28,6 +30,54 @@ def test_nested():
     inner_level = step_outer()
     assert steps.get_current() is None
     assert inner_level == 2
+
+
+@step()
+def step_parent_outer(*, step):
+    return step_parent_inner(step)
+
+
+@step()
+def step_parent_inner(parent, *, step):
+    return step.parent is parent
+
+
+def test_parent():
+    assert step_parent_outer()
+
+
+@step()
+def step_wait(started, release, *, step):
+    started.set()
+    assert release.wait(timeout=2)
+    assert steps.get_current() is step
+    return step
+
+
+def test_thread_local_stack():
+    thread_1_started = Event()
+    thread_2_started = Event()
+    release_thread_1 = Event()
+    release_thread_2 = Event()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_1 = executor.submit(step_wait, thread_1_started, release_thread_1)
+        assert thread_1_started.wait(timeout=2)
+
+        future_2 = executor.submit(step_wait, thread_2_started, release_thread_2)
+        assert thread_2_started.wait(timeout=2)
+
+        release_thread_1.set()
+        try:
+            step_1 = future_1.result(timeout=2)
+        finally:
+            release_thread_2.set()
+
+        step_2 = future_2.result(timeout=2)
+
+    assert step_1.level == 1
+    assert step_2.level == 1
+    assert steps.get_current() is None
 
 
 @step()

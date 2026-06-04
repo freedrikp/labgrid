@@ -1,5 +1,6 @@
 import inspect
 import os
+import threading
 import warnings
 from functools import wraps
 from time import monotonic
@@ -9,36 +10,57 @@ from time import monotonic
 # after some time
 class Steps:
     def __init__(self):
-        self._stack = []
+        self._local = threading.local()
         self._subscribers = []
+        self._subscribers_lock = threading.RLock()
+
+    def _get_stack(self):
+        try:
+            return self._local.stack
+        except AttributeError:
+            self._local.stack = []
+            return self._local.stack
 
     def get_current(self):
-        return self._stack[-1] if self._stack else None
+        stack = self._get_stack()
+        return stack[-1] if stack else None
 
     def get_new(self, title, tag, source, sourceinfo):
-        step = Step(title, level=len(self._stack) + 1, tag=tag, source=source, sourceinfo=sourceinfo)  # pylint: disable=redefined-outer-name
+        step = Step(  # pylint: disable=redefined-outer-name
+            title,
+            level=len(self._get_stack()) + 1,
+            tag=tag,
+            source=source,
+            sourceinfo=sourceinfo,
+        )
         return step
 
     def push(self, step):  # pylint: disable=redefined-outer-name
-        assert step not in self._stack
-        self._stack.append(step)
+        stack = self._get_stack()
+        assert step not in stack
         step.parent = self.get_current()
-        step.level = len(self._stack)
+        stack.append(step)
+        step.level = len(stack)
 
     def pop(self, step):  # pylint: disable=redefined-outer-name
-        assert self._stack[-1] is step
-        self._stack.pop()
+        stack = self._get_stack()
+        assert stack[-1] is step
+        stack.pop()
 
     def subscribe(self, callback):
-        self._subscribers.append(callback)
+        with self._subscribers_lock:
+            self._subscribers.append(callback)
 
     def unsubscribe(self, callback):
-        assert callback in self._subscribers
-        self._subscribers.remove(callback)
+        with self._subscribers_lock:
+            assert callback in self._subscribers
+            self._subscribers.remove(callback)
 
     def notify(self, event):
         # TODO: buffer and try to merge consecutive events
-        for subscriber in self._subscribers:
+        with self._subscribers_lock:
+            subscribers = list(self._subscribers)
+        for subscriber in subscribers:
             try:
                 subscriber(event)
             except Exception as e:  # pylint: disable=broad-except
@@ -108,6 +130,7 @@ class Step:
         self.args = None
         self.result = None
         self.exception = None
+        self.parent = None
         self._start_ts = None
         self._stop_ts = None
         self._skipped = False
