@@ -216,7 +216,7 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
         complete_cmd = [self._ssh, "-x", *self.ssh_prefix,
                         "-p", str(self.networkservice.port), "-l", self._get_username(),
                         self.networkservice.address
-                        ] + shlex.split(cmd)
+                        ] + cmd.split(" ")
         self.logger.debug("Sending command: %s", complete_cmd)
         if self.stderr_merge:
             stderr_pipe = subprocess.STDOUT
