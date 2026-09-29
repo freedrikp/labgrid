@@ -13,6 +13,7 @@ class Steps:
         self._local = threading.local()
         self._subscribers = []
         self._subscribers_lock = threading.RLock()
+        self._notify_lock = threading.RLock()
 
     def _get_stack(self):
         try:
@@ -48,23 +49,26 @@ class Steps:
         stack.pop()
 
     def subscribe(self, callback):
-        with self._subscribers_lock:
-            self._subscribers.append(callback)
+        with self._notify_lock:
+            with self._subscribers_lock:
+                self._subscribers.append(callback)
 
     def unsubscribe(self, callback):
-        with self._subscribers_lock:
-            assert callback in self._subscribers
-            self._subscribers.remove(callback)
+        with self._notify_lock:
+            with self._subscribers_lock:
+                assert callback in self._subscribers
+                self._subscribers.remove(callback)
 
     def notify(self, event):
         # TODO: buffer and try to merge consecutive events
-        with self._subscribers_lock:
-            subscribers = list(self._subscribers)
-        for subscriber in subscribers:
-            try:
-                subscriber(event)
-            except Exception as e:  # pylint: disable=broad-except
-                warnings.warn(f"unhandled exception during event notification: {e}")
+        with self._notify_lock:
+            with self._subscribers_lock:
+                subscribers = tuple(self._subscribers)
+            for subscriber in subscribers:
+                try:
+                    subscriber(event)
+                except Exception as e:  # pylint: disable=broad-except
+                    warnings.warn(f"unhandled exception during event notification: {e}")
 
 
 steps = Steps()

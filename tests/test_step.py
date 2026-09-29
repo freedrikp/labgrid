@@ -1,10 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, RLock
 from time import sleep
 
 import pytest
 
 from labgrid import step, steps
+from labgrid.step import Steps
 
 
 @step()
@@ -224,3 +225,107 @@ def test_subscriber_error():
     with pytest.warns(UserWarning):
         step = step_event_skip()
     steps.unsubscribe(callback)
+
+
+def test_subscriber_can_unsubscribe_during_notification():
+    local_steps = Steps()
+    calls = []
+
+    def first(event):
+        calls.append(("first", event))
+        local_steps.unsubscribe(first)
+
+    def second(event):
+        calls.append(("second", event))
+
+    local_steps.subscribe(first)
+    local_steps.subscribe(second)
+
+    event = object()
+    local_steps.notify(event)
+
+    assert calls == [("first", event), ("second", event)]
+
+
+def test_notifications_are_serialized():
+    local_steps = Steps()
+    first_started = Event()
+    release_first = Event()
+    second_submitted = Event()
+    second_started = Event()
+
+    def callback(event):
+        if event == "first":
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        else:
+            second_started.set()
+
+    def notify_second():
+        second_submitted.set()
+        local_steps.notify("second")
+
+    local_steps.subscribe(callback)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(local_steps.notify, "first")
+        assert first_started.wait(timeout=2)
+        second = executor.submit(notify_second)
+        assert second_submitted.wait(timeout=2)
+        try:
+            assert not second_started.wait(timeout=0.1)
+        finally:
+            release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+    assert second_started.is_set()
+
+
+def test_unsubscribe_waits_for_active_notification():
+    class ContentionTrackingRLock:
+        def __init__(self):
+            self._lock = RLock()
+            self.contention = Event()
+
+        def __enter__(self):
+            if not self._lock.acquire(blocking=False):
+                self.contention.set()
+                self._lock.acquire()
+            return self
+
+        def __exit__(self, _exc_type, _exc_value, _traceback):
+            self._lock.release()
+
+    local_steps = Steps()
+    notify_lock = ContentionTrackingRLock()
+    # Observe actual lock contention instead of relying on a scheduling delay.
+    local_steps._notify_lock = notify_lock
+    callback_started = Event()
+    release_callback = Event()
+    callback_release_observed = []
+    calls = []
+
+    def callback(event):
+        calls.append(event)
+        callback_started.set()
+        callback_release_observed.append(release_callback.wait(timeout=5))
+
+    local_steps.subscribe(callback)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        notification = executor.submit(local_steps.notify, "active")
+        try:
+            assert callback_started.wait(timeout=2)
+            removal = executor.submit(local_steps.unsubscribe, callback)
+            assert notify_lock.contention.wait(timeout=2)
+            assert not removal.done()
+        finally:
+            release_callback.set()
+
+        notification.result(timeout=2)
+        removal.result(timeout=2)
+
+    local_steps.notify("after-unsubscribe")
+    assert callback_release_observed == [True]
+    assert calls == ["active"]
